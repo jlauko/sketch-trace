@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Sketch Trace</title>
+  <meta name="theme-color" content="#16181c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-tab="prep">
+  <header>
+    <nav class="tabs">
+      <button data-tab-btn="prep" class="on">Prep</button>
+      <button data-tab-btn="trace">Trace</button>
+    </nav>
+    <label class="btn primary">
+      Open photo
+      <input id="file" type="file" accept="image/*" hidden>
+    </label>
+  </header>
+
+  <main>
+    <!-- ───────── Prep: turn a photo into something traceable ───────── -->
+    <section id="prep">
+      <div class="stage" id="prepStage">
+        <canvas id="view"></canvas>
+        <p class="empty" id="prepEmpty">Open a reference photo to get started.<br>You can also drop or paste one here.</p>
+      </div>
+
+      <div class="panel">
+        <div class="seg" id="modes">
+          <button data-mode="photo">Photo</button>
+          <button data-mode="gray">Gray</button>
+          <button data-mode="values">Values</button>
+          <button data-mode="edges">Edges</button>
+          <button data-mode="shapes">Shapes</button>
+        </div>
+
+        <label class="row" data-for="values shapes">
+          <span>Tones</span>
+          <input type="range" data-key="tones" min="2" max="7" step="1">
+          <output data-out="tones"></output>
+        </label>
+        <label class="row" data-for="values shapes edges">
+          <span>Simplify</span>
+          <input type="range" data-key="simplify" min="0" max="100" step="1">
+          <output data-out="simplify"></output>
+        </label>
+        <label class="row" data-for="edges">
+          <span>Detail</span>
+          <input type="range" data-key="edge" min="0" max="100" step="1">
+          <output data-out="edge"></output>
+        </label>
+        <label class="row" data-for="edges shapes">
+          <span>Line weight</span>
+          <input type="range" data-key="weight" min="1" max="6" step="1">
+          <output data-out="weight"></output>
+        </label>
+        <label class="check" data-for="edges shapes">
+          <input type="checkbox" data-key="dark"> White lines on black (best for a projector)
+        </label>
+
+        <hr>
+
+        <label class="row">
+          <span>Canvas</span>
+          <select data-key="ratio">
+            <option value="photo">Match photo</option>
+            <option value="5x7">5 × 7 in</option>
+            <option value="5.5x8.5">5.5 × 8.5 in sketchbook</option>
+            <option value="8x10">8 × 10 in</option>
+            <option value="9x12">9 × 12 in</option>
+            <option value="11x14">11 × 14 in</option>
+            <option value="12x16">12 × 16 in</option>
+            <option value="16x20">16 × 20 in</option>
+            <option value="18x24">18 × 24 in</option>
+            <option value="24x36">24 × 36 in</option>
+            <option value="square">Square</option>
+            <option value="a">A-series paper (A3, A4, A5)</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </label>
+        <div class="row" id="customRow">
+          <span>Size (in)</span>
+          <input type="number" data-key="customW" min="1" max="120" step="0.5">
+          <span class="x">×</span>
+          <input type="number" data-key="customH" min="1" max="120" step="0.5">
+        </div>
+        <label class="check" id="landscapeRow">
+          <input type="checkbox" data-key="landscape"> Landscape
+        </label>
+        <label class="row">
+          <span>Zoom</span>
+          <input type="range" data-key="zoom" min="1" max="8" step="0.01">
+          <output data-out="zoom"></output>
+        </label>
+        <label class="check">
+          <input type="checkbox" data-key="flip"> Mirror left–right
+        </label>
+        <label class="row">
+          <span>Grid</span>
+          <select data-key="grid">
+            <option value="0">Off</option>
+            <option value="d3">Thirds</option>
+            <option value="d4">4 × 4</option>
+            <option value="d6">6 × 6</option>
+            <option value="d8">8 × 8</option>
+            <option value="i1">1 inch squares</option>
+            <option value="i2">2 inch squares</option>
+            <option value="i3">3 inch squares</option>
+          </select>
+        </label>
+
+        <div class="actions">
+          <button class="btn" id="save">Save PNG</button>
+          <button class="btn" id="full">Full screen</button>
+        </div>
+        <p class="hint">Drag the picture to reposition it inside the canvas shape; pinch or scroll to zoom.</p>
+      </div>
+    </section>
+
+    <!-- ───────── Trace: camera with the drawing floated on top ───────── -->
+    <section id="trace">
+      <div class="stage" id="traceStage">
+        <video id="cam" playsinline muted autoplay></video>
+        <canvas id="overlay"></canvas>
+        <p class="empty" id="traceMsg"></p>
+      </div>
+      <div class="tracebar">
+        <div class="row">
+          <select data-key="mode" id="traceMode">
+            <option value="photo">Photo</option>
+            <option value="gray">Gray</option>
+            <option value="values">Values</option>
+            <option value="edges">Edges</option>
+            <option value="shapes">Shapes</option>
+          </select>
+          <input type="range" id="opacity" min="0.05" max="1" step="0.01" aria-label="Overlay strength">
+        </div>
+        <div class="row buttons">
+          <button class="btn" id="color" title="Line colour"><i id="swatch"></i> Lines</button>
+          <button class="btn" id="lock">Lock</button>
+          <button class="btn" id="reset">Reset</button>
+          <button class="btn" id="torch" hidden>Light</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
