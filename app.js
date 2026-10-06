@@ -46,6 +46,8 @@ const state = {
   corner: 'tl',   // which corner distances are measured from
   freeW: 10,      // canvas width for shapes with no built-in size (photo, square, A-series)
   points: [],     // tagged spots, as fractions of the source photo: { u, v }
+  face: null,     // detected face landmarks, same coordinates: { chin: { u, v }, ... }
+  faceOver: false, // Face view: draw the guides over the photo instead of a blank canvas
   // trace overlay
   opacity: 0.5,
   color: 0,
@@ -57,6 +59,7 @@ const state = {
 };
 
 let tagging = false; // Prep: taps on the picture add/remove measuring marks
+let faceTried = false, faceBusy = false, faceNote = ''; // Face view: detection status
 let src = null;     // canvas holding the (downscaled) source photo
 let result = null;  // last output of process()
 let tab = 'prep';
@@ -129,7 +132,9 @@ async function loadImage(blob, fresh) {
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   src = c;
   if (fresh) {
-    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height, points: [] });
+    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height, points: [], face: null });
+    faceTried = false;
+    faceNote = '';
     idbSet('image', blob).catch(() => {});
   }
   $('#prepEmpty').textContent = '';
@@ -310,6 +315,15 @@ function process(L) {
   const res = { W, H, rgba: d, mask: null, frame: f, crop: c };
   const mode = state.mode;
   if (mode === 'photo') return res;
+  if (mode === 'landmarks') {
+    // Guides are drawn afterwards as vector lines; this is just their backdrop.
+    res.guides = true;
+    if (!state.faceOver) {
+      const bg = state.dark ? 0 : 255;
+      for (let j = 0; j < d.length; j += 4) d[j] = d[j + 1] = d[j + 2] = bg;
+    }
+    return res;
+  }
 
   const g = new Float32Array(n);
   for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
@@ -365,8 +379,6 @@ function drawGrid(ctx, W, H, f) {
   ctx.stroke(path);
 }
 
-// Sized from the canvas shape alone (not the render's pixel size), so the
-// picture is exactly the same size on screen in every view and at every quality.
 // ── tagged points ──
 // Points are stored against the photo, so they stay on the same feature when
 // the crop, zoom or canvas size changes. These convert to and from a position
@@ -383,6 +395,7 @@ function fromCanvas(x, y, c) {
 
 // Inches as a tape-measure fraction (nearest 1/16); centimetres to one decimal.
 function fmt(inches) {
+  if (inches < 0) return `-${fmt(-inches)}`; // off the measuring edge
   if (state.unit === 'cm') return (inches * 2.54).toFixed(1);
   const n = Math.round(inches * 16), whole = Math.floor(n / 16);
   let num = n % 16, den = 16;
@@ -395,8 +408,11 @@ function measure(c, f) {
   const fromB = state.corner[0] === 'b', fromR = state.corner[1] === 'r';
   const v = fmt((fromB ? 1 - c.y : c.y) * f.hIn), h = fmt((fromR ? 1 - c.x : c.x) * f.wIn);
   const unit = state.unit;
+  const vTxt = `${fromB ? '↑' : '↓'} ${v}`, hTxt = `${fromR ? '←' : '→'} ${h}`;
   return {
-    short: `${fromB ? '↑' : '↓'} ${v}   ${fromR ? '←' : '→'} ${h}`,
+    vTxt,
+    hTxt,
+    short: `${vTxt}   ${hTxt}`,
     long: `${v} ${unit} from ${fromB ? 'bottom' : 'top'}, ${h} ${unit} from ${fromR ? 'right' : 'left'}`,
   };
 }
@@ -435,6 +451,153 @@ function drawPoints(ctx, W, H, res) {
   });
 }
 
+// ── face landmarks ──
+// MediaPipe face-mesh indices for the few points the guides need. "A" is the
+// side of the face on the left of the photo.
+const FACE_IDX = {
+  chin: 152, sideA: 234, sideB: 454,
+  irisA: 468, irisB: 473,
+  eyeAo: 33, eyeAi: 133, eyeBi: 362, eyeBo: 263,
+  browA: 105, browB: 334,
+  noseBase: 2, noseA: 129, noseB: 358,
+  mouthA: 61, mouthB: 291, lips: 13,
+};
+const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const FACE_MODEL =
+  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+let landmarker = null;
+
+async function findFace() {
+  if (faceBusy || !src) return;
+  faceBusy = faceTried = true;
+  faceNote = 'Finding the face… the first time, this downloads the face finder (about 14 MB).';
+  syncControls();
+  try {
+    if (!landmarker) {
+      const vision = await import(`${MP}/vision_bundle.mjs`);
+      const files = await vision.FilesetResolver.forVisionTasks(`${MP}/wasm`);
+      landmarker = await vision.FaceLandmarker.createFromOptions(files, {
+        baseOptions: { modelAssetPath: FACE_MODEL },
+        runningMode: 'IMAGE',
+        numFaces: 1,
+      });
+    }
+    // Look in what is on the canvas first (the face fills more of it), then
+    // in the whole photo.
+    let found = null;
+    for (const r of [cropRect(frame().a), { sx: 0, sy: 0, sw: src.width, sh: src.height }]) {
+      const k = Math.min(1, 1024 / Math.max(r.sw, r.sh));
+      const t = document.createElement('canvas');
+      t.width = Math.round(r.sw * k);
+      t.height = Math.round(r.sh * k);
+      t.getContext('2d').drawImage(src, r.sx, r.sy, r.sw, r.sh, 0, 0, t.width, t.height);
+      const lm = landmarker.detect(t).faceLandmarks[0];
+      if (!lm) continue;
+      found = {};
+      for (const [name, i] of Object.entries(FACE_IDX)) {
+        found[name] = { u: (r.sx + lm[i].x * r.sw) / src.width, v: (r.sy + lm[i].y * r.sh) / src.height };
+      }
+      break;
+    }
+    state.face = found;
+    faceNote = found ? '' : 'No face found. It works best on a clear, mostly front-on face: zoom in on it and try again.';
+  } catch (e) {
+    console.error(e);
+    faceNote = navigator.onLine
+      ? 'The face finder could not be loaded. Try again in a moment.'
+      : 'The face finder needs a connection the first time it is used.';
+  }
+  faceBusy = false;
+  syncControls();
+  if (result) repaint();
+}
+
+// Construction lines for a portrait: the levels of the brows, eyes, nose,
+// mouth and chin, the centre line, the width of the head, and where the eye
+// corners, nose wings and mouth corners fall — all following the head's tilt.
+function drawFace(ctx, W, H, res, color, halo) {
+  const f = state.face;
+  if (!f) return;
+  const P = {};
+  for (const k in f) {
+    const c = toCanvas(f[k], res.crop);
+    P[k] = { x: c.x * W, y: c.y * H };
+  }
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const eyes = mid(P.irisA, P.irisB);
+
+  // Unit vectors across the face (along the eye line) and down it.
+  let ex = P.irisB.x - P.irisA.x, ey = P.irisB.y - P.irisA.y;
+  const len = Math.hypot(ex, ey) || 1;
+  ex /= len;
+  ey /= len;
+  if (ex < 0) { ex = -ex; ey = -ey; }
+  let ax = -ey, ay = ex;
+  if ((P.chin.x - eyes.x) * ax + (P.chin.y - eyes.y) * ay < 0) { ax = -ax; ay = -ay; }
+  const across = (p) => (p.x - eyes.x) * ex + (p.y - eyes.y) * ey;
+  const down = (p) => (p.x - eyes.x) * ax + (p.y - eyes.y) * ay;
+  const at = (s, t) => ({ x: eyes.x + ex * s + ax * t, y: eyes.y + ey * s + ay * t });
+
+  const lo = Math.min(across(P.sideA), across(P.sideB)), hi = Math.max(across(P.sideA), across(P.sideB));
+  const pad = (hi - lo) * 0.08, chin = down(P.chin);
+  // The face finder can't see the top of the skull, so that one line is the
+  // textbook estimate (eyes halfway down the head), drawn dashed.
+  const levels = [
+    ['Brows', down(mid(P.browA, P.browB))],
+    ['Eyes', 0],
+    ['Nose', down(P.noseBase)],
+    ['Mouth', down(P.lips)],
+    ['Chin', chin],
+  ];
+
+  const u = Math.max(W, H) / 100;
+  const solid = new Path2D(), dashed = new Path2D();
+  const seg = (path, a, b) => { path.moveTo(a.x, a.y); path.lineTo(b.x, b.y); };
+  for (const [, t] of levels) seg(solid, at(lo - pad, t), at(hi + pad, t));
+  seg(dashed, at(lo - pad, -chin), at(hi + pad, -chin));
+  seg(solid, at(0, -chin), at(0, chin));   // centre line
+  seg(solid, at(lo, -chin), at(lo, chin)); // sides of the head
+  seg(solid, at(hi, -chin), at(hi, chin));
+  const tick = (p, t) => { const s = across(p); seg(solid, at(s, t - 1.3 * u), at(s, t + 1.3 * u)); };
+  for (const k of ['eyeAo', 'eyeAi', 'eyeBi', 'eyeBo']) tick(P[k], 0);
+  for (const k of ['noseA', 'noseB']) tick(P[k], levels[2][1]);
+  for (const k of ['mouthA', 'mouthB']) tick(P[k], levels[3][1]);
+  for (const k of ['irisA', 'irisB']) { solid.moveTo(P[k].x + 0.8 * u, P[k].y); solid.arc(P[k].x, P[k].y, 0.8 * u, 0, 2 * Math.PI); }
+
+  ctx.lineCap = 'round';
+  for (const [stroke, width] of halo ? [['rgba(0,0,0,.6)', 0.8 * u], [color, 0.3 * u]] : [[color, 0.3 * u]]) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = width;
+    ctx.setLineDash([]);
+    ctx.stroke(solid);
+    ctx.setLineDash([1.5 * u, 1.5 * u]);
+    ctx.stroke(dashed);
+  }
+  ctx.setLineDash([]);
+
+  // Labels: each level's distance from the top (or bottom) edge at the right
+  // of the head; the sides' and centre line's distance from the side edge below.
+  ctx.font = `600 ${2.3 * u}px system-ui, sans-serif`;
+  ctx.textBaseline = 'middle';
+  const m = (p) => measure({ x: p.x / W, y: p.y / H }, res.frame);
+  const label = (text, x, y, alignX) => {
+    const pad2 = 0.6 * u, bw = ctx.measureText(text).width + 2 * pad2, bh = 3.2 * u;
+    const bx = clamp(x - bw * alignX, 0, W - bw), by = clamp(y - bh / 2, 0, H - bh);
+    ctx.fillStyle = 'rgba(0,0,0,.8)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = '#ffd60a';
+    ctx.fillText(text, bx + pad2, by + bh / 2);
+  };
+  for (const [name, t] of [['Top (est.)', -chin], ...levels]) {
+    const end = at(hi + pad, t);
+    label(`${name} ${m(at(0, t)).vTxt}`, end.x + u, end.y, 0);
+  }
+  for (const [s, alignX] of [[lo, 1], [0, 0.5], [hi, 0]]) {
+    const p = at(s, chin);
+    label(m(p).hTxt, p.x, p.y + 2.6 * u, alignX);
+  }
+}
+
 function renderPointList() {
   const list = $('#ptList');
   list.textContent = '';
@@ -447,6 +610,8 @@ function renderPointList() {
   }
 }
 
+// Sized from the canvas shape alone (not the render's pixel size), so the
+// picture is exactly the same size on screen in every view and at every quality.
 function fitInto(el, a, boxW, boxH) {
   const w = Math.min(boxW, boxH * a);
   el.style.width = `${w}px`;
@@ -459,6 +624,9 @@ function paintView() {
   view.width = W;
   view.height = H;
   vctx.putImageData(new ImageData(result.rgba, W, H), 0, 0);
+  if (result.guides) {
+    drawFace(vctx, W, H, result, state.faceOver ? '#00e5ff' : state.dark ? '#fff' : '#000', state.faceOver);
+  }
   drawGrid(vctx, W, H, result.frame);
   drawPoints(vctx, W, H, result);
   const stage = $('#prepStage');
@@ -472,17 +640,18 @@ function paintOverlay() {
   const { W, H, mask } = result;
   overlay.width = W;
   overlay.height = H;
+  const hex = LINE_COLORS[state.color % LINE_COLORS.length];
   if (mask) {
-    const hex = LINE_COLORS[state.color % LINE_COLORS.length];
     const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
     const img = octx.createImageData(W, H), d = img.data;
     for (let i = 0, j = 0; i < mask.length; i++, j += 4) {
       d[j] = r; d[j + 1] = g; d[j + 2] = b; d[j + 3] = mask[i] * 255;
     }
     octx.putImageData(img, 0, 0);
-  } else {
+  } else if (!result.guides || state.faceOver) {
     octx.putImageData(new ImageData(result.rgba, W, H), 0, 0);
   }
+  if (result.guides) drawFace(octx, W, H, result, hex, state.faceOver);
   drawGrid(octx, W, H, result.frame);
   drawPoints(octx, W, H, result);
   const stage = $('#traceStage');
@@ -500,6 +669,7 @@ function render(L) {
   if (!src) return;
   result = process(L);
   repaint();
+  if (state.mode === 'landmarks' && !state.face && !faceTried) findFace();
 }
 
 // Redraw from the last processed image (enough when only the marks changed).
@@ -541,7 +711,10 @@ function syncControls() {
   $('#tag').textContent = tagging ? 'Tagging: tap the picture' : 'Tag points';
   view.classList.toggle('tagging', tagging);
 
-  const line = state.mode === 'edges' || state.mode === 'shapes';
+  const line = ['edges', 'shapes', 'landmarks'].includes(state.mode);
+  $('#faceMsg').textContent = faceNote;
+  $('#faceMsg').hidden = state.mode !== 'landmarks' || !faceNote;
+  $('#refind').disabled = faceBusy;
   $('#color').hidden = !line;
   $('#swatch').style.background = LINE_COLORS[state.color % LINE_COLORS.length];
   $('#opacity').value = state.opacity;
@@ -601,6 +774,7 @@ $('#save').addEventListener('click', () => {
 
 $('#tag').addEventListener('click', () => { tagging = !tagging; syncControls(); });
 $('#clearPts').addEventListener('click', () => { state.points = []; repaint(); });
+$('#refind').addEventListener('click', () => { state.face = null; findFace(); });
 
 const prepStage = $('#prepStage');
 if (!prepStage.requestFullscreen) $('#full').hidden = true;

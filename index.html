@@ -40,6 +40,7 @@
           <button data-mode="values">Values</button>
           <button data-mode="edges">Edges</button>
           <button data-mode="shapes">Shapes</button>
+          <button data-mode="landmarks">Face</button>
         </div>
 
         <label class="row" data-for="values shapes">
@@ -62,9 +63,16 @@
           <input type="range" data-key="weight" min="1" max="6" step="1">
           <output data-out="weight"></output>
         </label>
-        <label class="check" data-for="edges shapes">
+        <label class="check" data-for="edges shapes landmarks">
           <input type="checkbox" data-key="dark"> White lines on black (best for a projector)
         </label>
+        <label class="check" data-for="landmarks">
+          <input type="checkbox" data-key="faceOver"> Show the photo underneath
+        </label>
+        <div class="row" data-for="landmarks">
+          <button class="btn grow" id="refind">Find the face again</button>
+        </div>
+        <p class="hint" id="faceMsg"></p>
 
         <hr>
 
@@ -169,6 +177,7 @@
             <option value="values">Values</option>
             <option value="edges">Edges</option>
             <option value="shapes">Shapes</option>
+            <option value="landmarks">Face</option>
           </select>
           <input type="range" id="opacity" min="0.05" max="1" step="0.01" aria-label="Overlay strength">
         </div>
