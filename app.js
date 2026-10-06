@@ -8,7 +8,7 @@ const FULL_L = 1400;     // long side of the finished render, px
 const PREVIEW_L = 520;   // long side while a slider or finger is moving
 const SOURCE_MAX = 2800; // photos are downscaled to this on load
 
-// [short side, long side, has a real size in inches]
+// [short side, long side, true when those numbers are real inches]
 const RATIOS = {
   '5x7': [5, 7, true],
   '5.5x8.5': [5.5, 8.5, true],
@@ -41,6 +41,11 @@ const state = {
   cy: 0.5,
   flip: false,
   grid: '0',
+  // measuring
+  unit: 'in',     // 'in' | 'cm' — also the unit customW/customH/freeW are typed in
+  corner: 'tl',   // which corner distances are measured from
+  freeW: 10,      // canvas width for shapes with no built-in size (photo, square, A-series)
+  points: [],     // tagged spots, as fractions of the source photo: { u, v }
   // trace overlay
   opacity: 0.5,
   color: 0,
@@ -51,6 +56,7 @@ const state = {
   locked: false,
 };
 
+let tagging = false; // Prep: taps on the picture add/remove measuring marks
 let src = null;     // canvas holding the (downscaled) source photo
 let result = null;  // last output of process()
 let tab = 'prep';
@@ -123,7 +129,7 @@ async function loadImage(blob, fresh) {
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   src = c;
   if (fresh) {
-    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height });
+    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height, points: [] });
     idbSet('image', blob).catch(() => {});
   }
   $('#prepEmpty').textContent = '';
@@ -133,19 +139,21 @@ async function loadImage(blob, fresh) {
 
 // ───────────────────────── geometry ─────────────────────────
 
-// The canvas shape being painted on: aspect ratio, plus inches when known.
+// The canvas being painted on: aspect ratio and real size in inches.
 function frame() {
-  if (state.ratio === 'photo') return { a: src.width / src.height, wIn: null, hIn: null };
+  const toIn = state.unit === 'cm' ? 1 / 2.54 : 1;
+  const sized = (a, wIn) => ({ a, wIn, hIn: wIn / a });
+  if (state.ratio === 'photo') return sized(src.width / src.height, (+state.freeW || 1) * toIn);
   let s, l, inches = true;
   if (state.ratio === 'custom') {
-    const a = +state.customW || 1, b = +state.customH || 1;
+    const a = (+state.customW || 1) * toIn, b = (+state.customH || 1) * toIn;
     s = Math.min(a, b);
     l = Math.max(a, b);
   } else {
     [s, l, inches] = RATIOS[state.ratio];
   }
   const w = state.landscape ? l : s, h = state.landscape ? s : l;
-  return { a: w / h, wIn: inches ? w : null, hIn: inches ? h : null };
+  return inches ? { a: w / h, wIn: w, hIn: h } : sized(w / h, (+state.freeW || 1) * toIn);
 }
 
 // Which rectangle of the source photo fills that shape (also clamps the pan).
@@ -341,7 +349,6 @@ function drawGrid(ctx, W, H, f) {
     stepX = W / n;
     stepY = H / n;
   } else {
-    if (!f.wIn) return;
     const inch = +g.slice(1);
     stepX = W / f.wIn * inch;
     stepY = H / f.hIn * inch;
@@ -360,6 +367,86 @@ function drawGrid(ctx, W, H, f) {
 
 // Sized from the canvas shape alone (not the render's pixel size), so the
 // picture is exactly the same size on screen in every view and at every quality.
+// ── tagged points ──
+// Points are stored against the photo, so they stay on the same feature when
+// the crop, zoom or canvas size changes. These convert to and from a position
+// within the canvas (0..1 across, 0..1 down).
+function toCanvas(p, c) {
+  const x = (p.u * src.width - c.sx) / c.sw, y = (p.v * src.height - c.sy) / c.sh;
+  return { x: state.flip ? 1 - x : x, y };
+}
+
+function fromCanvas(x, y, c) {
+  if (state.flip) x = 1 - x;
+  return { u: (c.sx + x * c.sw) / src.width, v: (c.sy + y * c.sh) / src.height };
+}
+
+// Inches as a tape-measure fraction (nearest 1/16); centimetres to one decimal.
+function fmt(inches) {
+  if (state.unit === 'cm') return (inches * 2.54).toFixed(1);
+  const n = Math.round(inches * 16), whole = Math.floor(n / 16);
+  let num = n % 16, den = 16;
+  if (!num) return `${whole}`;
+  while (num % 2 === 0) { num /= 2; den /= 2; }
+  return `${whole ? `${whole} ` : ''}${num}/${den}`;
+}
+
+function measure(c, f) {
+  const fromB = state.corner[0] === 'b', fromR = state.corner[1] === 'r';
+  const v = fmt((fromB ? 1 - c.y : c.y) * f.hIn), h = fmt((fromR ? 1 - c.x : c.x) * f.wIn);
+  const unit = state.unit;
+  return {
+    short: `${fromB ? '↑' : '↓'} ${v}   ${fromR ? '←' : '→'} ${h}`,
+    long: `${v} ${unit} from ${fromB ? 'bottom' : 'top'}, ${h} ${unit} from ${fromR ? 'right' : 'left'}`,
+  };
+}
+
+const onCanvas = (c) => c.x >= 0 && c.x <= 1 && c.y >= 0 && c.y <= 1;
+
+function drawPoints(ctx, W, H, res) {
+  if (!state.points.length) return;
+  const u = Math.max(W, H) / 100; // everything scales with the picture
+  ctx.font = `600 ${2.6 * u}px system-ui, sans-serif`;
+  ctx.textBaseline = 'middle';
+  state.points.forEach((p, i) => {
+    const c = toCanvas(p, res.crop);
+    if (!onCanvas(c)) return;
+    const x = c.x * W, y = c.y * H;
+    for (const [color, width] of [['rgba(0,0,0,.75)', 0.9 * u], ['#ffd60a', 0.35 * u]]) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.arc(x, y, 1.2 * u, 0, 2 * Math.PI);
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        ctx.moveTo(x + dx * 1.2 * u, y + dy * 1.2 * u);
+        ctx.lineTo(x + dx * 2.4 * u, y + dy * 2.4 * u);
+      }
+      ctx.stroke();
+    }
+    const text = `${i + 1}:  ${measure(c, res.frame).short}`;
+    const pad = 0.8 * u, bw = ctx.measureText(text).width + 2 * pad, bh = 3.8 * u;
+    let bx = x + 3 * u, by = y - bh - u;
+    if (bx + bw > W) bx = x - 3 * u - bw;
+    if (by < 0) by = y + u;
+    ctx.fillStyle = 'rgba(0,0,0,.8)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = '#ffd60a';
+    ctx.fillText(text, bx + pad, by + bh / 2);
+  });
+}
+
+function renderPointList() {
+  const list = $('#ptList');
+  list.textContent = '';
+  if (!result) return;
+  for (const p of state.points) {
+    const c = toCanvas(p, result.crop), li = document.createElement('li');
+    li.textContent = onCanvas(c) ? measure(c, result.frame).long : 'outside the canvas';
+    li.classList.toggle('off', !onCanvas(c));
+    list.append(li);
+  }
+}
+
 function fitInto(el, a, boxW, boxH) {
   const w = Math.min(boxW, boxH * a);
   el.style.width = `${w}px`;
@@ -373,6 +460,7 @@ function paintView() {
   view.height = H;
   vctx.putImageData(new ImageData(result.rgba, W, H), 0, 0);
   drawGrid(vctx, W, H, result.frame);
+  drawPoints(vctx, W, H, result);
   const stage = $('#prepStage');
   fitInto(view, result.frame.a, stage.clientWidth, stage.clientHeight);
 }
@@ -396,6 +484,7 @@ function paintOverlay() {
     octx.putImageData(new ImageData(result.rgba, W, H), 0, 0);
   }
   drawGrid(octx, W, H, result.frame);
+  drawPoints(octx, W, H, result);
   const stage = $('#traceStage');
   fitInto(overlay, result.frame.a, stage.clientWidth * 0.85, stage.clientHeight * 0.7);
   placeOverlay();
@@ -410,7 +499,13 @@ function placeOverlay() {
 function render(L) {
   if (!src) return;
   result = process(L);
+  repaint();
+}
+
+// Redraw from the last processed image (enough when only the marks changed).
+function repaint() {
   if (tab === 'prep') paintView(); else paintOverlay();
+  renderPointList();
   saveState();
 }
 
@@ -439,14 +534,12 @@ function syncControls() {
 
   $('#customRow').hidden = state.ratio !== 'custom';
   $('#landscapeRow').hidden = state.ratio === 'photo' || state.ratio === 'square';
-
-  // Inch grids only make sense when the canvas has a real size.
-  const inches = state.ratio === 'custom' || !!(RATIOS[state.ratio] && RATIOS[state.ratio][2]);
-  for (const o of $$('[data-key="grid"] option')) if (o.value[0] === 'i') o.disabled = !inches;
-  if (!inches && state.grid[0] === 'i') {
-    state.grid = '0';
-    $('[data-key="grid"]').value = '0';
-  }
+  // Shapes with no built-in size need a width before anything can be measured.
+  $('#freeRow').hidden = state.ratio === 'custom' || !!(RATIOS[state.ratio] && RATIOS[state.ratio][2]);
+  for (const el of $$('i.unit')) el.textContent = state.unit;
+  $('#tag').classList.toggle('on', tagging);
+  $('#tag').textContent = tagging ? 'Tagging: tap the picture' : 'Tag points';
+  view.classList.toggle('tagging', tagging);
 
   const line = state.mode === 'edges' || state.mode === 'shapes';
   $('#color').hidden = !line;
@@ -460,6 +553,11 @@ for (const el of $$('[data-key]')) {
   const discrete = el.tagName === 'SELECT' || el.type === 'checkbox';
   el.addEventListener(discrete ? 'change' : 'input', () => {
     const numeric = el.type === 'range' || el.type === 'number';
+    if (el.dataset.key === 'unit' && el.value !== state.unit) {
+      // Typed sizes keep their real length when the unit changes.
+      const k = el.value === 'cm' ? 2.54 : 1 / 2.54;
+      for (const f of ['customW', 'customH', 'freeW']) state[f] = +(state[f] * k).toFixed(2);
+    }
     state[el.dataset.key] = el.type === 'checkbox' ? el.checked : numeric ? +el.value : el.value;
     syncControls();
     schedule();
@@ -501,19 +599,24 @@ $('#save').addEventListener('click', () => {
   }, 'image/png');
 });
 
+$('#tag').addEventListener('click', () => { tagging = !tagging; syncControls(); });
+$('#clearPts').addEventListener('click', () => { state.points = []; repaint(); });
+
 const prepStage = $('#prepStage');
 if (!prepStage.requestFullscreen) $('#full').hidden = true;
 $('#full').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen(); else prepStage.requestFullscreen();
 });
 
-addEventListener('resize', () => { if (tab === 'prep') paintView(); else paintOverlay(); });
+addEventListener('resize', repaint);
 
 // ───────────────────────── gestures ─────────────────────────
 
-// One finger drags; two fingers pinch, twist and carry.
-function gestures(el, { drag, pinch }) {
+// One finger drags; two fingers pinch, twist and carry. A press that barely
+// moves is a tap.
+function gestures(el, { down, drag, pinch, tap }) {
   const pts = new Map();
+  let travel = 0, multi = false;
   const measure = () => {
     const [a, b] = [...pts.values()];
     return {
@@ -525,15 +628,19 @@ function gestures(el, { drag, pinch }) {
   };
   el.addEventListener('pointerdown', (e) => {
     try { el.setPointerCapture(e.pointerId); } catch {}
+    if (pts.size === 0) { travel = 0; multi = false; } else multi = true;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1 && down) down(e);
   });
   el.addEventListener('pointermove', (e) => {
     const p = pts.get(e.pointerId);
     if (!p) return;
     if (pts.size === 1) {
-      drag(e.clientX - p.x, e.clientY - p.y);
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      travel += Math.hypot(dx, dy);
       p.x = e.clientX;
       p.y = e.clientY;
+      if (travel > 6) drag(dx, dy, e);
     } else if (pts.size === 2) {
       const before = measure();
       p.x = e.clientX;
@@ -542,15 +649,56 @@ function gestures(el, { drag, pinch }) {
       pinch({ k: after.d / before.d, da: after.ang - before.ang, from: before, to: after });
     }
   });
-  const up = (e) => pts.delete(e.pointerId);
-  el.addEventListener('pointerup', up);
-  el.addEventListener('pointercancel', up);
+  el.addEventListener('pointerup', (e) => {
+    if (pts.delete(e.pointerId) && pts.size === 0 && !multi && travel <= 6 && tap) tap(e);
+  });
+  el.addEventListener('pointercancel', (e) => pts.delete(e.pointerId));
 }
 
-// Prep: move/zoom the photo inside the canvas shape.
+// Where a pointer event falls within the picture, 0..1 each way.
+function viewPos(e) {
+  const r = view.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, r };
+}
+
+// Index of the mark under the pointer, or -1.
+function pointAt(e) {
+  if (!result) return -1;
+  const { x, y, r } = viewPos(e);
+  let best = -1, reach = 22; // screen px
+  state.points.forEach((p, i) => {
+    const c = toCanvas(p, result.crop);
+    const d = Math.hypot((c.x - x) * r.width, (c.y - y) * r.height);
+    if (d < reach) { reach = d; best = i; }
+  });
+  return best;
+}
+
+let held = -1; // mark being dragged
+
+// Prep: move/zoom the photo inside the canvas shape; tag and move marks.
 gestures(view, {
-  drag(dx, dy) {
+  down(e) {
+    held = tagging ? pointAt(e) : -1;
+  },
+  tap(e) {
+    if (!tagging || !result) return;
+    const i = pointAt(e);
+    if (i >= 0) state.points.splice(i, 1);
+    else {
+      const { x, y } = viewPos(e);
+      state.points.push(fromCanvas(x, y, result.crop));
+    }
+    repaint();
+  },
+  drag(dx, dy, e) {
     if (!result) return;
+    if (held >= 0) {
+      const { x, y } = viewPos(e);
+      state.points[held] = fromCanvas(clamp(x, 0, 1), clamp(y, 0, 1), result.crop);
+      repaint();
+      return;
+    }
     const { crop } = result, w = view.clientWidth, h = view.clientHeight;
     state.cx -= (state.flip ? -1 : 1) * dx / w * crop.sw / src.width;
     state.cy -= dy / h * crop.sh / src.height;

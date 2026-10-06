@@ -152,6 +152,15 @@ button, select, input { font: inherit; color: inherit; }
 .row output { flex: none; width: 34px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 .row .x { color: var(--dim); }
 
+.row .grow { flex: 1; }
+.row i.unit { font-style: normal; }
+
+#view.tagging { cursor: crosshair; }
+
+#ptList { margin: 0; padding-left: 26px; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
+#ptList:empty { display: none; }
+#ptList li.off { color: var(--dim); }
+
 .check { display: flex; align-items: center; gap: 8px; }
 .check input { accent-color: var(--accent); width: 18px; height: 18px; }
 

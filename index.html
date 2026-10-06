@@ -87,10 +87,14 @@
           </select>
         </label>
         <div class="row" id="customRow">
-          <span>Size (in)</span>
-          <input type="number" data-key="customW" min="1" max="120" step="0.5">
+          <span>Size (<i class="unit"></i>)</span>
+          <input type="number" data-key="customW" min="1" max="400" step="any">
           <span class="x">×</span>
-          <input type="number" data-key="customH" min="1" max="120" step="0.5">
+          <input type="number" data-key="customH" min="1" max="400" step="any">
+        </div>
+        <div class="row" id="freeRow">
+          <span>Width (<i class="unit"></i>)</span>
+          <input type="number" data-key="freeW" min="1" max="400" step="any">
         </div>
         <label class="check" id="landscapeRow">
           <input type="checkbox" data-key="landscape"> Landscape
@@ -117,11 +121,36 @@
           </select>
         </label>
 
+        <hr>
+
+        <div class="row">
+          <span>Measure</span>
+          <button class="btn grow" id="tag">Tag points</button>
+          <button class="btn" id="clearPts">Clear</button>
+        </div>
+        <label class="row">
+          <span>Units</span>
+          <select data-key="unit">
+            <option value="in">Inches</option>
+            <option value="cm">Centimetres</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>From</span>
+          <select data-key="corner">
+            <option value="tl">Top and left edges</option>
+            <option value="tr">Top and right edges</option>
+            <option value="bl">Bottom and left edges</option>
+            <option value="br">Bottom and right edges</option>
+          </select>
+        </label>
+        <ol id="ptList"></ol>
+
         <div class="actions">
           <button class="btn" id="save">Save PNG</button>
           <button class="btn" id="full">Full screen</button>
         </div>
-        <p class="hint">Drag the picture to reposition it inside the canvas shape; pinch or scroll to zoom.</p>
+        <p class="hint">Drag the picture to reposition it inside the canvas shape; pinch or scroll to zoom. With Tag points on, tap to mark a spot, drag a mark to move it, tap a mark to remove it.</p>
       </div>
     </section>
 
