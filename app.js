@@ -46,6 +46,7 @@ const state = {
   corner: 'tl',   // which corner distances are measured from
   freeW: 10,      // canvas width for shapes with no built-in size (photo, square, A-series)
   points: [],     // tagged spots, as fractions of the source photo: { u, v }
+  lines: [],      // measured distances, each between two such spots: { a, b }
   face: null,     // detected face landmarks, same coordinates: { chin: { u, v }, ... }
   faceOver: false, // Face view: draw the guides over the photo instead of a blank canvas
   // trace overlay
@@ -58,7 +59,8 @@ const state = {
   locked: false,
 };
 
-let tagging = false; // Prep: taps on the picture add/remove measuring marks
+let tool = '';       // Prep: what a tap on the picture does — '' | 'tag' | 'dist'
+let pending = null;  // Distance tool: the first end, while waiting for the second
 let faceTried = false, faceBusy = false, faceNote = ''; // Face view: detection status
 let src = null;     // canvas holding the (downscaled) source photo
 let result = null;  // last output of process()
@@ -132,7 +134,8 @@ async function loadImage(blob, fresh) {
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   src = c;
   if (fresh) {
-    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height, points: [], face: null });
+    Object.assign(state, { zoom: 1, cx: 0.5, cy: 0.5, landscape: c.width > c.height, points: [], lines: [], face: null });
+    pending = null;
     faceTried = false;
     faceNote = '';
     idbSet('image', blob).catch(() => {});
@@ -394,9 +397,9 @@ function fromCanvas(x, y, c) {
 }
 
 // Inches as a tape-measure fraction (nearest 1/16); centimetres to one decimal.
-function fmt(inches) {
-  if (inches < 0) return `-${fmt(-inches)}`; // off the measuring edge
-  if (state.unit === 'cm') return (inches * 2.54).toFixed(1);
+function fmt(inches, unit = state.unit) {
+  if (inches < 0) return `-${fmt(-inches, unit)}`; // off the measuring edge
+  if (unit === 'cm') return (inches * 2.54).toFixed(1);
   const n = Math.round(inches * 16), whole = Math.floor(n / 16);
   let num = n % 16, den = 16;
   if (!num) return `${whole}`;
@@ -449,6 +452,52 @@ function drawPoints(ctx, W, H, res) {
     ctx.fillStyle = '#ffd60a';
     ctx.fillText(text, bx + pad, by + bh / 2);
   });
+}
+
+// ── measured distances ──
+// Real length of a line on the canvas, in inches.
+function lineLength(l, res) {
+  const a = toCanvas(l.a, res.crop), b = toCanvas(l.b, res.crop);
+  return Math.hypot((b.x - a.x) * res.frame.wIn, (b.y - a.y) * res.frame.hIn);
+}
+
+const lineName = (i) => String.fromCharCode(65 + (i % 26));
+
+function drawLines(ctx, W, H, res) {
+  if (!state.lines.length && !pending) return;
+  const u = Math.max(W, H) / 100, green = '#30d158';
+  const px = (p) => { const c = toCanvas(p, res.crop); return { x: c.x * W, y: c.y * H }; };
+  const stroke = (path) => {
+    for (const [color, width] of [['rgba(0,0,0,.75)', 0.9 * u], [green, 0.35 * u]]) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke(path);
+    }
+  };
+  const dot = (path, p) => { path.moveTo(p.x + 0.9 * u, p.y); path.arc(p.x, p.y, 0.9 * u, 0, 2 * Math.PI); };
+  ctx.font = `600 ${2.6 * u}px system-ui, sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.lineCap = 'round';
+  state.lines.forEach((l, i) => {
+    const a = px(l.a), b = px(l.b), path = new Path2D();
+    path.moveTo(a.x, a.y);
+    path.lineTo(b.x, b.y);
+    dot(path, a);
+    dot(path, b);
+    stroke(path);
+    const text = `${lineName(i)}:  ${fmt(lineLength(l, res))} ${state.unit}`;
+    const pad = 0.8 * u, bw = ctx.measureText(text).width + 2 * pad, bh = 3.8 * u;
+    const bx = clamp((a.x + b.x) / 2 - bw / 2, 0, W - bw), by = clamp((a.y + b.y) / 2 - bh - u, 0, H - bh);
+    ctx.fillStyle = 'rgba(0,0,0,.8)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = green;
+    ctx.fillText(text, bx + pad, by + bh / 2);
+  });
+  if (pending) {
+    const path = new Path2D();
+    dot(path, px(pending));
+    stroke(path);
+  }
 }
 
 // ── face landmarks ──
@@ -602,12 +651,30 @@ function renderPointList() {
   const list = $('#ptList');
   list.textContent = '';
   if (!result) return;
-  for (const p of state.points) {
-    const c = toCanvas(p, result.crop), li = document.createElement('li');
-    li.textContent = onCanvas(c) ? measure(c, result.frame).long : 'outside the canvas';
+  // One row of text with a remove button that takes entry i out of `from`.
+  const row = (text, from, i) => {
+    const li = document.createElement('li'), x = document.createElement('button');
+    x.textContent = '×';
+    x.className = 'remove';
+    x.setAttribute('aria-label', 'Remove');
+    x.addEventListener('click', () => { from.splice(i, 1); repaint(); });
+    li.append(text, x);
+    return li;
+  };
+  state.points.forEach((p, i) => {
+    const c = toCanvas(p, result.crop);
+    const li = row(onCanvas(c) ? measure(c, result.frame).long : 'outside the canvas', state.points, i);
     li.classList.toggle('off', !onCanvas(c));
     list.append(li);
-  }
+  });
+  // Distances are given in both units, whichever one the picture is labelled in.
+  const lines = $('#lineList');
+  lines.textContent = '';
+  state.lines.forEach((l, i) => {
+    const d = lineLength(l, result);
+    lines.append(row(`${lineName(i)}: ${fmt(d, 'in')} in  (${fmt(d, 'cm')} cm)`, state.lines, i));
+  });
+  $('#clearRow').hidden = !state.points.length && !state.lines.length && !pending;
 }
 
 // Sized from the canvas shape alone (not the render's pixel size), so the
@@ -629,6 +696,7 @@ function paintView() {
   }
   drawGrid(vctx, W, H, result.frame);
   drawPoints(vctx, W, H, result);
+  drawLines(vctx, W, H, result);
   const stage = $('#prepStage');
   fitInto(view, result.frame.a, stage.clientWidth, stage.clientHeight);
 }
@@ -654,6 +722,7 @@ function paintOverlay() {
   if (result.guides) drawFace(octx, W, H, result, hex, state.faceOver);
   drawGrid(octx, W, H, result.frame);
   drawPoints(octx, W, H, result);
+  drawLines(octx, W, H, result);
   const stage = $('#traceStage');
   fitInto(overlay, result.frame.a, stage.clientWidth * 0.85, stage.clientHeight * 0.7);
   placeOverlay();
@@ -707,9 +776,14 @@ function syncControls() {
   // Shapes with no built-in size need a width before anything can be measured.
   $('#freeRow').hidden = state.ratio === 'custom' || !!(RATIOS[state.ratio] && RATIOS[state.ratio][2]);
   for (const el of $$('i.unit')) el.textContent = state.unit;
-  $('#tag').classList.toggle('on', tagging);
-  $('#tag').textContent = tagging ? 'Tagging: tap the picture' : 'Tag points';
-  view.classList.toggle('tagging', tagging);
+  $('#tag').classList.toggle('on', tool === 'tag');
+  $('#dist').classList.toggle('on', tool === 'dist');
+  view.classList.toggle('tagging', !!tool);
+  const toolMsg = tool === 'tag' ? 'Tap the picture to mark a point.'
+    : tool === 'dist' ? (pending ? 'Now tap the second point.' : 'Tap the first point to measure from.')
+    : '';
+  $('#toolMsg').textContent = toolMsg;
+  $('#toolMsg').hidden = !toolMsg;
 
   const line = ['edges', 'shapes', 'landmarks'].includes(state.mode);
   $('#faceMsg').textContent = faceNote;
@@ -772,8 +846,21 @@ $('#save').addEventListener('click', () => {
   }, 'image/png');
 });
 
-$('#tag').addEventListener('click', () => { tagging = !tagging; syncControls(); });
-$('#clearPts').addEventListener('click', () => { state.points = []; repaint(); });
+for (const name of ['tag', 'dist']) {
+  $(`#${name}`).addEventListener('click', () => {
+    tool = tool === name ? '' : name;
+    pending = null;
+    syncControls();
+    if (result) repaint();
+  });
+}
+$('#clearPts').addEventListener('click', () => {
+  state.points = [];
+  state.lines = [];
+  pending = null;
+  syncControls();
+  repaint();
+});
 $('#refind').addEventListener('click', () => { state.face = null; findFace(); });
 
 const prepStage = $('#prepStage');
@@ -835,41 +922,53 @@ function viewPos(e) {
   return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height, r };
 }
 
-// Index of the mark under the pointer, or -1.
-function pointAt(e) {
-  if (!result) return -1;
+// The mark under the pointer that the active tool can act on: a tagged point
+// ({ i }) or one end of a measured line ({ i, end }). Null if none.
+function markAt(e) {
+  if (!result) return null;
   const { x, y, r } = viewPos(e);
-  let best = -1, reach = 22; // screen px
-  state.points.forEach((p, i) => {
+  let best = null, reach = 22; // screen px
+  const test = (p, ref) => {
     const c = toCanvas(p, result.crop);
     const d = Math.hypot((c.x - x) * r.width, (c.y - y) * r.height);
-    if (d < reach) { reach = d; best = i; }
-  });
+    if (d < reach) { reach = d; best = ref; }
+  };
+  if (tool === 'tag') state.points.forEach((p, i) => test(p, { i }));
+  if (tool === 'dist') state.lines.forEach((l, i) => { test(l.a, { i, end: 'a' }); test(l.b, { i, end: 'b' }); });
   return best;
 }
 
-let held = -1; // mark being dragged
+let held = null; // mark being dragged
 
 // Prep: move/zoom the photo inside the canvas shape; tag and move marks.
 gestures(view, {
   down(e) {
-    held = tagging ? pointAt(e) : -1;
+    held = tool ? markAt(e) : null;
   },
   tap(e) {
-    if (!tagging || !result) return;
-    const i = pointAt(e);
-    if (i >= 0) state.points.splice(i, 1);
-    else {
-      const { x, y } = viewPos(e);
-      state.points.push(fromCanvas(x, y, result.crop));
+    if (!tool || !result) return;
+    const hit = markAt(e), { x, y } = viewPos(e), here = fromCanvas(x, y, result.crop);
+    if (tool === 'tag') {
+      if (hit) state.points.splice(hit.i, 1); else state.points.push(here);
+    } else {
+      // Tapping an existing line's end starts (or finishes) exactly there, so
+      // several distances can be taken from the same spot.
+      const p = hit ? { ...state.lines[hit.i][hit.end] } : here;
+      if (pending) {
+        state.lines.push({ a: pending, b: p });
+        pending = null;
+      } else {
+        pending = p;
+      }
     }
+    syncControls();
     repaint();
   },
   drag(dx, dy, e) {
     if (!result) return;
-    if (held >= 0) {
-      const { x, y } = viewPos(e);
-      state.points[held] = fromCanvas(clamp(x, 0, 1), clamp(y, 0, 1), result.crop);
+    if (held) {
+      const { x, y } = viewPos(e), p = fromCanvas(clamp(x, 0, 1), clamp(y, 0, 1), result.crop);
+      if (held.end) state.lines[held.i][held.end] = p; else state.points[held.i] = p;
       repaint();
       return;
     }

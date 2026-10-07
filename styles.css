@@ -158,7 +158,10 @@ button, select, input { font: inherit; color: inherit; }
 #view.tagging { cursor: crosshair; }
 
 #ptList { margin: 0; padding-left: 26px; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
-#ptList:empty { display: none; }
+#ptList:empty, #lineList:empty { display: none; }
+#ptList li, #lineList li { line-height: 28px; }
+.remove { float: right; width: 28px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: transparent; cursor: pointer; }
+#lineList { margin: 0; padding-left: 8px; list-style: none; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
 #ptList li.off { color: var(--dim); }
 
 .check { display: flex; align-items: center; gap: 8px; }

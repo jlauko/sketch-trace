@@ -134,8 +134,9 @@
         <div class="row">
           <span>Measure</span>
           <button class="btn grow" id="tag">Tag points</button>
-          <button class="btn" id="clearPts">Clear</button>
+          <button class="btn grow" id="dist">Distance</button>
         </div>
+        <p class="hint" id="toolMsg"></p>
         <label class="row">
           <span>Units</span>
           <select data-key="unit">
@@ -153,12 +154,16 @@
           </select>
         </label>
         <ol id="ptList"></ol>
+        <ul id="lineList"></ul>
+        <div class="row" id="clearRow">
+          <button class="btn grow" id="clearPts">Clear all marks</button>
+        </div>
 
         <div class="actions">
           <button class="btn" id="save">Save PNG</button>
           <button class="btn" id="full">Full screen</button>
         </div>
-        <p class="hint">Drag the picture to reposition it inside the canvas shape; pinch or scroll to zoom. With Tag points on, tap to mark a spot, drag a mark to move it, tap a mark to remove it.</p>
+        <p class="hint">Drag the picture to reposition it inside the canvas shape; pinch or scroll to zoom. With Tag points or Distance on, tap to mark and drag a mark to move it. Remove a mark with the × beside it in the list.</p>
       </div>
     </section>
 

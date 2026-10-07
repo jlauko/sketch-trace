@@ -1,5 +1,5 @@
 // Bump VERSION whenever any file below changes, so installed copies pick it up.
-const VERSION = 'sketch-trace-v5';
+const VERSION = 'sketch-trace-v6';
 const FILES = [
   './',
   'index.html',
